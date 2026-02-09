@@ -100,6 +100,25 @@ Battery: {{ $json.batteryPercentage }}%
 Time: {{ $json.timestamp }}
 ```
 
+## テスト
+
+### MQTT サブスクライブのテスト
+
+n8n を使わずに、AWS IoT への接続とトピックサブスクライブが正常に動作するか確認できます。
+
+```bash
+npm install
+npx tsx test/subscribe.ts <DEVICE_UUID>
+```
+
+以下の順番で確認が行われます:
+
+1. **Cognito 認証** - 一時クレデンシャルの取得
+2. **MQTT 接続** - AWS IoT エンドポイントへの WebSocket 接続
+3. **トピックサブスクライブ** - デバイスシャドウトピックの購読
+
+サブスクライブ成功後はメッセージ待ち受け状態になります。Sesame アプリや物理的に鍵を操作すると、ロック状態やバッテリー情報がリアルタイムに表示されます。`Ctrl+C` で終了。
+
 ## 技術的な仕組み
 
 - AWS Cognito Identity Pool で一時的なクレデンシャルを取得（認証不要のパブリックアクセス）
