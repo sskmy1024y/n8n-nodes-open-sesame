@@ -1,61 +1,48 @@
 # n8n-nodes-open-sesame
 
-SESAME スマートロック (CANDY HOUSE) の鍵開閉イベントをリアルタイムに検知し、n8n ワークフローをトリガーするカスタムノードです。
+A custom n8n trigger node that detects SESAME smart lock (CANDY HOUSE) lock/unlock events in real time.
 
-AWS IoT MQTT over WebSocket を使い、Sesame デバイスのシャドウ更新をサブスクライブすることで、ロック/アンロックイベントを即座に検知します。
+It subscribes to Sesame device shadow updates via AWS IoT MQTT over WebSocket, enabling instant detection of lock/unlock events.
 
-## インストール
+## Installation
 
-### n8n Community Node として
+1. Open your n8n instance
+2. Go to **Settings** > **Community Nodes**
+3. Enter `n8n-nodes-open-sesame` and click **Install**
 
-```bash
-# n8n のカスタムノードディレクトリにインストール
-cd ~/.n8n/custom
-npm install /path/to/n8n-open-sesame
-```
-
-または、n8n の GUI から Community Nodes > Install で `n8n-nodes-open-sesame` を検索してインストールできます。
-
-### 開発用
+Alternatively, install via CLI:
 
 ```bash
-git clone <this-repo>
-cd n8n-open-sesame
-npm install
-npm run build
-npm link
-
-# n8n のカスタムノードディレクトリでリンク
-cd ~/.n8n/custom
-npm link n8n-nodes-open-sesame
+# In your n8n installation directory
+npm install n8n-nodes-open-sesame
 ```
 
-## セットアップ
+## Setup
 
-### 1. Sesame デバイス UUID の取得
+### 1. Get Your Sesame Device UUID
 
-Sesame アプリでデバイスの設定画面を開き、UUID を確認してください。
+Open the device settings in the Sesame app and find your UUID.
 
-### 2. n8n でクレデンシャルを設定
+### 2. Configure Credentials in n8n
 
-1. n8n を起動
-2. **Credentials** > **New** > **Sesame API** を選択
-3. **Device UUID(s)** にデバイスの UUID を入力（複数の場合はカンマ区切り）
+1. Start n8n
+2. Go to **Credentials** > **New** > **Sesame API**
+3. Enter your device UUID(s) in **Device UUID(s)** (comma-separated for multiple devices)
 
-### 3. ワークフローの作成
+### 3. Create a Workflow
 
-1. **Sesame Trigger** ノードを追加
-2. 作成した Sesame API クレデンシャルを選択
-3. **Event Filter** でトリガーするイベントを選択:
-   - `All Events` - ロック・アンロック両方
-   - `Locked Only` - ロック時のみ
-   - `Unlocked Only` - アンロック時のみ
-4. **Emit Only On Change** を有効にすると、状態が変化した時のみトリガーされます
-5. 後続ノード（Slack、メール等）を接続
+1. Add a **Sesame Trigger** node
+2. Select your Sesame API credential
+3. Choose an **Event Filter**:
+   - `All Events` — both lock and unlock
+   - `Locked Only` — lock events only
+   - `Unlocked Only` — unlock events only
+4. Enable **Emit Only On Change** to trigger only when the state changes
+5. Connect downstream nodes (Slack, email, etc.)
 
-## 出力データ
+## Output Data
 
-トリガー時に以下のデータが出力されます:
+The trigger emits the following data:
 
 ```json
 {
@@ -75,22 +62,22 @@ Sesame アプリでデバイスの設定画面を開き、UUID を確認して�
 }
 ```
 
-### フィールド説明
+### Field Reference
 
-| フィールド | 型 | 説明 |
+| Field | Type | Description |
 |---|---|---|
-| `event` | `"locked"` \| `"unlocked"` | ロック状態 |
-| `deviceUuid` | string | デバイス UUID |
-| `batteryVoltage` | number | バッテリー電圧 (V) |
-| `batteryPercentage` | number | バッテリー残量 (%) |
-| `isBatteryCritical` | boolean | バッテリー低下警告 |
-| `position` | number | 現在のロック位置 |
-| `target` | number | 目標位置 |
-| `timestamp` | string | イベント発生時刻 (ISO 8601) |
+| `event` | `"locked"` \| `"unlocked"` | Lock state |
+| `deviceUuid` | string | Device UUID |
+| `batteryVoltage` | number | Battery voltage (V) |
+| `batteryPercentage` | number | Battery level (%) |
+| `isBatteryCritical` | boolean | Low battery warning |
+| `position` | number | Current lock position |
+| `target` | number | Target position |
+| `timestamp` | string | Event timestamp (ISO 8601) |
 
-## Slack 通知の例
+## Slack Notification Example
 
-Sesame Trigger → Slack ノードを接続し、メッセージに以下のような Expression を設定:
+Connect Sesame Trigger to a Slack node and use expressions like:
 
 ```
 🔐 Sesame Lock Event
@@ -100,32 +87,32 @@ Battery: {{ $json.batteryPercentage }}%
 Time: {{ $json.timestamp }}
 ```
 
-## テスト
+## Testing
 
-### MQTT サブスクライブのテスト
+### MQTT Subscribe Test
 
-n8n を使わずに、AWS IoT への接続とトピックサブスクライブが正常に動作するか確認できます。
+You can verify the AWS IoT connection and topic subscription without n8n:
 
 ```bash
 npm install
 npx tsx test/subscribe.ts <DEVICE_UUID>
 ```
 
-以下の順番で確認が行われます:
+The test runs through the following steps:
 
-1. **Cognito 認証** - 一時クレデンシャルの取得
-2. **MQTT 接続** - AWS IoT エンドポイントへの WebSocket 接続
-3. **トピックサブスクライブ** - デバイスシャドウトピックの購読
+1. **Cognito Authentication** — obtain temporary credentials
+2. **MQTT Connection** — WebSocket connection to the AWS IoT endpoint
+3. **Topic Subscribe** — subscribe to the device shadow topic
 
-サブスクライブ成功後はメッセージ待ち受け状態になります。Sesame アプリや物理的に鍵を操作すると、ロック状態やバッテリー情報がリアルタイムに表示されます。`Ctrl+C` で終了。
+After a successful subscription, it enters a message-waiting state. Operating the lock via the Sesame app or physically will display lock state and battery information in real time. Press `Ctrl+C` to exit.
 
-## 技術的な仕組み
+## How It Works
 
-- AWS Cognito Identity Pool で一時的なクレデンシャルを取得（認証不要のパブリックアクセス）
-- AWS IoT MQTT over WebSocket でデバイスシャドウの更新をサブスクライブ
-- クレデンシャルは有効期限前に自動更新
-- `mechst` ペイロードを解析してロック状態・バッテリー情報を取得
+- Obtains temporary credentials from AWS Cognito Identity Pool (unauthenticated public access)
+- Subscribes to device shadow updates via AWS IoT MQTT over WebSocket
+- Automatically refreshes credentials before expiration
+- Parses the `mechst` payload to extract lock state and battery information
 
-## ライセンス
+## License
 
 MIT
