@@ -4,16 +4,21 @@ import type {
 	INodeTypeDescription,
 	ITriggerResponse,
 } from 'n8n-workflow';
-import type { device as AwsIotDevice } from 'aws-iot-device-sdk';
 import {
-	getCognitoCredentials,
-	createMqttConnection,
-	scheduleCredentialRefresh,
-	getShadowTopic,
-	parseMechStatus,
+	createMemoryTokenStore,
 	getLockEvent,
+	isBatteryCritical,
+	normalizeUuid,
+	parseTokensJson,
 } from './SesameHelper';
-import type { LockEvent } from './SesameHelper';
+import type { LockEvent, StateInfo } from './SesameHelper';
+
+interface StateChangePush {
+	data?: {
+		deviceUUID?: string;
+		stateInfo?: StateInfo;
+	};
+}
 
 export class SesameTrigger implements INodeType {
 	description: INodeTypeDescription = {
@@ -23,8 +28,7 @@ export class SesameTrigger implements INodeType {
 		group: ['trigger'],
 		version: 1,
 		subtitle: 'Sesame Lock Event',
-		description:
-			'Triggers the workflow when a SESAME smart lock is locked or unlocked',
+		description: 'Triggers the workflow when a SESAME smart lock is locked or unlocked',
 		defaults: {
 			name: 'Sesame Trigger',
 		},
@@ -62,8 +66,8 @@ export class SesameTrigger implements INodeType {
 
 	async trigger(this: ITriggerFunctions): Promise<ITriggerResponse> {
 		const credentials = await this.getCredentials('sesameApi');
-		const deviceUuidsRaw = credentials.deviceUuids as string;
-		const deviceUuids = deviceUuidsRaw
+
+		const deviceUuids = (credentials.deviceUuids as string)
 			.split(',')
 			.map((u) => u.trim())
 			.filter(Boolean);
@@ -74,142 +78,154 @@ export class SesameTrigger implements INodeType {
 			);
 		}
 
-		const eventFilter = this.getNodeParameter('eventFilter') as string;
-		const emitOnlyOnChange = this.getNodeParameter(
-			'emitOnlyOnChange',
-		) as boolean;
+		const tokens = parseTokensJson((credentials.tokensJson as string) ?? '');
+		const companyID = ((credentials.companyID as string) || 'ch_CandyhouseMobile').trim();
 
-		let mqttDevice: AwsIotDevice | null = null;
-		let refreshTimer: NodeJS.Timeout | null = null;
+		const eventFilter = this.getNodeParameter('eventFilter') as 'all' | LockEvent;
+		const emitOnlyOnChange = this.getNodeParameter('emitOnlyOnChange') as boolean;
+
+		const watched = new Set(deviceUuids.map(normalizeUuid));
 		const lastEventByDevice = new Map<string, LockEvent>();
-		const decoder = new TextDecoder('utf8');
 
-		const startConsumer = async () => {
-			const cognitoCredentials = await getCognitoCredentials();
-			mqttDevice = createMqttConnection(cognitoCredentials);
+		// Released by closeFunction; keeps the scoped `SesameHub3.use` session open.
+		let release: () => void = () => {};
+		const sessionEnd = new Promise<void>((resolve) => {
+			release = resolve;
+		});
 
-			// クレデンシャルの自動更新をスケジュール
-			refreshTimer = scheduleCredentialRefresh(
-				mqttDevice,
-				cognitoCredentials,
-				(err) => {
-					this.logger.error(
-						'Failed to refresh Cognito credentials',
-						{ error: err.message },
-					);
-				},
-			);
+		const handlePush = (msg: StateChangePush) => {
+			const deviceUuid = msg?.data?.deviceUUID;
+			const stateInfo = msg?.data?.stateInfo;
+			if (!deviceUuid || !stateInfo) return;
 
-			mqttDevice.on('connect', () => {
-				this.logger.info('Connected to Sesame AWS IoT');
+			const key = normalizeUuid(deviceUuid);
+			if (!watched.has(key)) return;
 
-				for (const uuid of deviceUuids) {
-					const topic = getShadowTopic(uuid);
-					mqttDevice!.subscribe(topic, { qos: 1 }, (err) => {
-						if (err) {
-							this.logger.error(
-								`Failed to subscribe to device ${uuid}`,
-								{ error: String(err) },
-							);
-						} else {
-							this.logger.info(`Subscribed to device ${uuid}`);
-						}
-					});
-				}
-			});
+			this.logger.debug(`Sesame push for ${deviceUuid}: ${JSON.stringify(stateInfo)}`);
 
-			mqttDevice.on('message', (topic: string, payload: Uint8Array) => {
-				try {
-					const data = decoder.decode(payload);
-					const json = JSON.parse(data);
-					const mechstHex: unknown = json?.state?.reported?.mechst;
+			// Most pushes are `{wm2State: true}` heartbeats with no lock status.
+			const event = getLockEvent(stateInfo);
+			if (event === null) return;
 
-					if (typeof mechstHex !== 'string') return;
+			if (emitOnlyOnChange && lastEventByDevice.get(key) === event) return;
+			lastEventByDevice.set(key, event);
 
-					// トピックからデバイスUUIDを抽出
-					const topicParts = topic.split('/');
-					const deviceUuid =
-						topicParts[topicParts.indexOf('name') + 1] ?? 'unknown';
+			if (eventFilter !== 'all' && eventFilter !== event) return;
 
-					const status = parseMechStatus(mechstHex);
-					const event = getLockEvent(status);
-
-					// "moving" はフィルタ対象外
-					if (event === 'moving') return;
-
-					// 変化がない場合はスキップ（オプション）
-					if (emitOnlyOnChange) {
-						const lastEvent = lastEventByDevice.get(deviceUuid);
-						if (lastEvent === event) return;
-					}
-					lastEventByDevice.set(deviceUuid, event);
-
-					// イベントフィルタチェック
-					if (eventFilter !== 'all' && eventFilter !== event) return;
-
-					this.emit([
-						this.helpers.returnJsonArray([
-							{
-								event,
-								deviceUuid,
-								batteryVoltage: status.batteryVoltage,
-								batteryPercentage: status.batteryPercentage,
-								isBatteryCritical: status.isBatteryCritical,
-								position: status.position,
-								target: status.target,
-								isInLockRange: status.isInLockRange,
-								isInUnlockRange: status.isInUnlockRange,
-								timestamp: new Date().toISOString(),
-								raw: { mechst: mechstHex },
-							},
-						]),
-					]);
-				} catch (err) {
-					this.logger.error('Failed to process MQTT message', {
-						error: String(err),
-					});
-				}
-			});
-
-			mqttDevice.on('error', (error: string | Error) => {
-				const message =
-					typeof error === 'string' ? error : error.message;
-				this.logger.error('Sesame MQTT error', { error: message });
-			});
-
-			mqttDevice.on('reconnect', () => {
-				this.logger.info('Reconnecting to Sesame AWS IoT...');
-			});
-
-			mqttDevice.on('close', () => {
-				this.logger.info('Sesame MQTT connection closed');
-			});
+			this.emit([
+				this.helpers.returnJsonArray([
+					{
+						event,
+						deviceUuid,
+						batteryPercentage: stateInfo.batteryPercentage,
+						batteryVoltage: stateInfo.batteryVoltage,
+						isBatteryCritical: isBatteryCritical(stateInfo.batteryPercentage),
+						position: stateInfo.position,
+						wm2State: stateInfo.wm2State,
+						timestamp: new Date().toISOString(),
+						raw: { stateInfo },
+					},
+				]),
+			]);
 		};
 
-		const closeFunction = async () => {
-			if (refreshTimer) {
-				clearTimeout(refreshTimer);
-				refreshTimer = null;
-			}
-			if (mqttDevice) {
-				return new Promise<void>((resolve) => {
-					mqttDevice!.end(false, () => {
-						this.logger.info('Sesame MQTT client disconnected');
-						mqttDevice = null;
-						resolve();
-					});
+		// `@sesame-kit/core` is ESM-only. `new Function` keeps this a real dynamic import after
+		// TypeScript emits CommonJS (a plain `await import()` would be downlevelled to `require`,
+		// which cannot load an ESM package on the Node versions n8n ships with).
+		const dynamicImport = new Function('specifier', 'return import(specifier)') as (
+			specifier: string,
+		) => Promise<{ SesameHub3: SesameHub3Like }>;
+		const { SesameHub3 } = await dynamicImport('@sesame-kit/core/client');
+
+		const tokenStore = createMemoryTokenStore(tokens);
+
+		const session = SesameHub3.use(
+			{ tokenStore, config: { companyID } },
+			async (hub: SesameHubLike) => {
+				// The server only pushes for devices named in a `subscribeDevicesUpdate` frame, and
+				// it expects the frame to carry `deviceModel` as the official web app sends it — a
+				// UUID-only item is accepted but produces no pushes. Look the models up once.
+				const models = new Map<string, string | undefined>();
+				try {
+					for (const device of await hub.listDevices()) {
+						if (device?.deviceUUID) {
+							models.set(normalizeUuid(device.deviceUUID), device.deviceModel);
+						}
+					}
+				} catch (error) {
+					this.logger.warn(
+						`Could not list SESAME devices, subscribing without deviceModel: ${(error as Error).message}`,
+					);
+				}
+
+				const unsubscribes = deviceUuids.map((uuid) => {
+					const deviceModel = models.get(normalizeUuid(uuid));
+					if (models.size > 0 && !deviceModel) {
+						this.logger.warn(
+							`Device ${uuid} is not in this account's device list; it will never emit`,
+						);
+					}
+					return hub.onLockStateChangeDevice(uuid, handlePush, { deviceModel });
 				});
+				this.logger.info(`Subscribed to SESAME state push for ${deviceUuids.length} device(s)`);
+				await sessionEnd;
+				for (const off of unsubscribes) {
+					try {
+						off();
+					} catch {
+						// ignore unsubscribe errors on shutdown
+					}
+				}
+			},
+		);
+
+		session.catch((error: Error) => {
+			this.logger.error('Sesame state-push session ended with an error', {
+				error: error.message,
+			});
+			// Surface the failure in n8n instead of dying silently, which is how the previous
+			// MQTT implementation hid its own breakage for weeks.
+			this.emitError?.(error);
+		});
+
+		const closeFunction = async () => {
+			release();
+			try {
+				await session;
+			} catch {
+				// already reported above
 			}
+			this.logger.info('Sesame state-push session closed');
 		};
 
 		const manualTriggerFunction = async () => {
-			await startConsumer();
+			// Nothing extra to do: `trigger()` already opened the subscription.
 		};
 
 		if (this.getMode() !== 'manual') {
-			await startConsumer();
 			return { closeFunction };
 		}
 		return { closeFunction, manualTriggerFunction };
 	}
+}
+
+interface SesameHub3Like {
+	use: (
+		opts: Record<string, unknown>,
+		fn: (hub: SesameHubLike) => Promise<void>,
+	) => Promise<void>;
+}
+
+interface SesameDeviceLike {
+	deviceUUID?: string;
+	deviceModel?: string;
+}
+
+interface SesameHubLike {
+	listDevices: () => Promise<SesameDeviceLike[]>;
+	onLockStateChangeDevice: (
+		deviceUUID: string,
+		fn: (msg: StateChangePush) => void,
+		opts?: { deviceModel?: string },
+	) => () => void;
 }

@@ -2,7 +2,17 @@
 
 A custom n8n trigger node that detects SESAME smart lock (CANDY HOUSE) lock/unlock events in real time.
 
-It subscribes to Sesame device shadow updates via AWS IoT MQTT over WebSocket, enabling instant detection of lock/unlock events.
+It subscribes to the device-state push channel that the official SESAME web app uses, so lock
+and unlock events arrive immediately — no polling, no Web API rate-limit concerns.
+
+> **Breaking change in v0.2.0** — v0.1.x subscribed to the AWS IoT device shadow with
+> *unauthenticated* Cognito credentials (the route popularised by `homebridge-open-sesame` and
+> `pysesame3`). CANDY HOUSE revoked IoT access for the published identity pool around late
+> September 2026: both the old (`a3i4hui4gxwoo8-ats`) and current (`d06107753ay3c67v7y9pa-ats`)
+> endpoints now answer `403 Forbidden` for unauthenticated **and** authenticated identities, and
+> the MQTT client simply reconnect-loops in silence. v0.2.0 replaces that route with the
+> authenticated Biz3 WebSocket (`biz3TriggerLocker:pubDeviceStateChange`), which requires a
+> logged-in SESAME account. See [Setup](#setup).
 
 ## Installation
 
@@ -19,17 +29,40 @@ npm install n8n-nodes-open-sesame
 
 ## Setup
 
-### 1. Get Your Sesame Device UUID
+### 1. Sign in to your SESAME account once
 
-Open the device settings in the Sesame app and find your UUID.
+The push channel requires a logged-in account. The official login is passwordless: a code is
+emailed to you. [`sesame-kit`](https://github.com/FukumotoIkuma/sesame-kit) implements the same
+flow as the official app, so use it to mint the tokens:
 
-### 2. Configure Credentials in n8n
+```bash
+npx sesame-kit login you@example.com   # a verification code is emailed to you
+npx sesame-kit verify <code>           # writes ~/.config/sesame-kit/tokens.json
+```
 
-1. Start n8n
-2. Go to **Credentials** > **New** > **Sesame API**
-3. Enter your device UUID(s) in **Device UUID(s)** (comma-separated for multiple devices)
+### 2. Find your device UUID
 
-### 3. Create a Workflow
+`npx sesame-kit devices` lists them, or open the device settings in the SESAME app.
+
+Note that only locks report `CHSesame2Status: locked / unlocked`. A SESAME Bot or an Open Sensor
+publishes different values (`Open` / `Closed`), which this trigger ignores.
+
+### 3. Configure credentials in n8n
+
+1. Go to **Credentials** > **New** > **Sesame API**
+2. **Device UUID(s)** — the lock(s) to watch, comma-separated
+3. **Tokens JSON** — paste the entire contents of `~/.config/sesame-kit/tokens.json`
+4. **Company ID** — leave at `ch_CandyhouseMobile` for a personal account (verify with
+   `npx sesame-kit whoami`)
+
+> The tokens grant full control of your lock. Treat them like a password: they live in n8n's
+> encrypted credential store and should not be committed or pasted anywhere else.
+
+The node refreshes the Cognito id token on its own. Refresh tokens are not rotated, so the pasted
+value keeps working across n8n restarts; you only repeat step 1 if you sign out elsewhere or the
+refresh token is revoked.
+
+### 4. Create a workflow
 
 1. Add a **Sesame Trigger** node
 2. Select your Sesame API credential
@@ -42,22 +75,18 @@ Open the device settings in the Sesame app and find your UUID.
 
 ## Output Data
 
-The trigger emits the following data:
-
 ```json
 {
-  "event": "locked",
+  "event": "unlocked",
   "deviceUuid": "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
-  "batteryVoltage": 5.92,
-  "batteryPercentage": 95,
+  "batteryVoltage": 5.996,
+  "batteryPercentage": 100,
   "isBatteryCritical": false,
-  "position": 123,
-  "target": 0,
-  "isInLockRange": true,
-  "isInUnlockRange": false,
-  "timestamp": "2026-02-09T12:00:00.000Z",
+  "position": 822,
+  "wm2State": true,
+  "timestamp": "2026-10-18T07:46:32.005Z",
   "raw": {
-    "mechst": "e803..."
+    "stateInfo": { "CHSesame2Status": "unlocked", "batteryPercentage": 100 }
   }
 }
 ```
@@ -70,10 +99,14 @@ The trigger emits the following data:
 | `deviceUuid` | string | Device UUID |
 | `batteryVoltage` | number | Battery voltage (V) |
 | `batteryPercentage` | number | Battery level (%) |
-| `isBatteryCritical` | boolean | Low battery warning |
-| `position` | number | Current lock position |
-| `target` | number | Target position |
-| `timestamp` | string | Event timestamp (ISO 8601) |
+| `isBatteryCritical` | boolean | True at 20% or below |
+| `position` | number | Current thumb-turn position |
+| `wm2State` | boolean | Wi-Fi Module / Hub connectivity |
+| `timestamp` | string | Time the push was received (ISO 8601) |
+| `raw.stateInfo` | object | Unmodified push payload |
+
+`event` is derived from `stateInfo.CHSesame2Status`. Pushes without that field (frequent
+`{"wm2State": true}` connectivity heartbeats) are ignored.
 
 ## Slack Notification Example
 
@@ -89,29 +122,31 @@ Time: {{ $json.timestamp }}
 
 ## Testing
 
-### MQTT Subscribe Test
-
-You can verify the AWS IoT connection and topic subscription without n8n:
+Verify the subscription without n8n:
 
 ```bash
-npm install
-npx tsx test/subscribe.ts <DEVICE_UUID>
+npm install && npm run build
+SESAME_UUID=<device uuid> node test/harness.js
 ```
 
-The test runs through the following steps:
-
-1. **Cognito Authentication** — obtain temporary credentials
-2. **MQTT Connection** — WebSocket connection to the AWS IoT endpoint
-3. **Topic Subscribe** — subscribe to the device shadow topic
-
-After a successful subscription, it enters a message-waiting state. Operating the lock via the Sesame app or physically will display lock state and battery information in real time. Press `Ctrl+C` to exit.
+The harness fakes n8n's trigger context, reads the tokens from
+`~/.config/sesame-kit/tokens.json`, connects, and prints every emitted item. Lock or unlock the
+device and the event appears. It exits after `WAIT_SEC` seconds (default 300).
 
 ## How It Works
 
-- Obtains temporary credentials from AWS Cognito Identity Pool (unauthenticated public access)
-- Subscribes to device shadow updates via AWS IoT MQTT over WebSocket
-- Automatically refreshes credentials before expiration
-- Parses the `mechst` payload to extract lock state and battery information
+- Reads the stored SESAME account tokens and refreshes the Cognito id token as needed
+  (`REFRESH_TOKEN_AUTH`, including `DEVICE_KEY` for device-tracking pools)
+- Connects to the Biz3 WebSocket used by the official web app and sends
+  `biz3ManageDevice:subscribeDevicesUpdate` for each watched device
+- Receives `biz3TriggerLocker:pubDeviceStateChange` pushes and maps
+  `stateInfo.CHSesame2Status` to a lock event
+- Re-sends the subscription frame after a reconnect (server-side subscriptions do not survive a
+  dropped connection) and reports a dead session through n8n's error channel instead of looping
+  silently
+
+Auth, transport and reconnection are delegated to
+[`@sesame-kit/core`](https://www.npmjs.com/package/@sesame-kit/core).
 
 ## License
 

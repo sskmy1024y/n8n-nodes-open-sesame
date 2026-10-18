@@ -1,15 +1,14 @@
 {
 	"name": "n8n-nodes-open-sesame",
-	"version": "0.1.0",
-	"description": "n8n trigger node for SESAME smart lock events via AWS IoT MQTT",
+	"version": "0.2.0",
+	"description": "n8n trigger node for SESAME smart lock lock/unlock events (realtime state push)",
 	"license": "MIT",
 	"keywords": [
 		"n8n-community-node-package",
 		"n8n",
 		"sesame",
 		"smart-lock",
-		"mqtt",
-		"iot"
+		"websocket"
 	],
 	"main": "dist/index.js",
 	"scripts": {
@@ -34,13 +33,9 @@
 		"n8n-workflow": "*"
 	},
 	"dependencies": {
-		"@aws-sdk/client-cognito-identity": "^3.700.0",
-		"aws-iot-device-sdk": "^2.2.13",
-		"uuid": "^11.0.0"
+		"@sesame-kit/core": "^0.7.0"
 	},
 	"devDependencies": {
-		"@types/aws-iot-device-sdk": "^2.2.8",
-		"@types/uuid": "^10.0.0",
 		"n8n-workflow": "*",
 		"tsx": "^4.21.0",
 		"typescript": "~5.7.0"
