@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-open-sesame",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"description": "n8n trigger node for SESAME smart lock lock/unlock events (realtime state push)",
 	"license": "MIT",
 	"keywords": [
@@ -11,6 +11,9 @@
 		"websocket"
 	],
 	"main": "dist/index.js",
+	"bin": {
+		"n8n-nodes-open-sesame": "bin/n8n-nodes-open-sesame.mjs"
+	},
 	"scripts": {
 		"build": "tsc && cp nodes/SesameTrigger/sesame.svg dist/nodes/SesameTrigger/",
 		"dev": "tsc --watch",
@@ -18,7 +21,8 @@
 		"pack": "npm run build && node scripts/pack.mjs"
 	},
 	"files": [
-		"dist"
+		"dist",
+		"bin"
 	],
 	"n8n": {
 		"n8nNodesApiVersion": 1,

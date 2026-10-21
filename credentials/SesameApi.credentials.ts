@@ -14,7 +14,7 @@ export class SesameApi implements ICredentialType {
 			required: true,
 			placeholder: 'XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX',
 			description:
-				'Sesame device UUID(s) to watch. Multiple UUIDs can be separated by commas. Found in the Sesame app under device settings.',
+				'Device UUID(s) to watch — locks and/or Open Sensors, comma-separated. List them with `npx n8n-nodes-open-sesame devices`, or read them from the Sesame app under device settings.',
 		},
 		{
 			displayName: 'Tokens JSON',
@@ -24,7 +24,7 @@ export class SesameApi implements ICredentialType {
 			default: '',
 			required: true,
 			description:
-				'Cognito tokens for the SESAME account, as issued by the official app login flow. Obtain it with `npx sesame-kit login <email>` + `sesame verify <code>` and paste the contents of ~/.config/sesame-kit/tokens.json. Must include refreshToken, clientId and (if present) deviceKey/deviceGroupKey/devicePassword.',
+				'Cognito tokens for the SESAME account, as issued by the official passwordless login flow. Mint them with `npx n8n-nodes-open-sesame login <email>` + `verify <code>`, which prints the JSON to paste here. Must include refreshToken, clientId and (if present) deviceKey/deviceGroupKey/devicePassword.',
 		},
 		{
 			displayName: 'Company ID',
@@ -32,7 +32,7 @@ export class SesameApi implements ICredentialType {
 			type: 'string',
 			default: 'ch_CandyhouseMobile',
 			description:
-				'Company ID used by the device-state subscription. Personal accounts use ch_CandyhouseMobile (check with `sesame whoami`).',
+				'Company ID used by the device-state subscription. Leave as ch_CandyhouseMobile for a personal account.',
 		},
 	];
 }

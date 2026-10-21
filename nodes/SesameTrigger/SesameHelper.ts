@@ -14,8 +14,10 @@
  */
 
 export type LockEvent = 'locked' | 'unlocked';
+export type SensorEvent = 'open' | 'closed';
+export type EventCategory = 'lock' | 'sensor' | 'unknown';
 
-/** Shape of the tokens issued by `sesame login` / `sesame verify`. */
+/** Shape of the tokens issued by the bundled `login` / `verify` commands. */
 export interface StoredTokens {
 	idToken?: string | null;
 	accessToken?: string | null;
@@ -70,7 +72,7 @@ export function parseTokensJson(raw: string): StoredTokens {
 		parsed = JSON.parse(raw);
 	} catch (error) {
 		throw new Error(
-			'Tokens JSON is not valid JSON. Paste the contents of ~/.config/sesame-kit/tokens.json.',
+			'Tokens JSON is not valid JSON. Paste the JSON printed by `npx n8n-nodes-open-sesame verify <code>`.',
 		);
 	}
 	if (!parsed || typeof parsed !== 'object') {
@@ -78,7 +80,9 @@ export function parseTokensJson(raw: string): StoredTokens {
 	}
 	const tokens = parsed as StoredTokens;
 	if (!tokens.refreshToken) {
-		throw new Error('Tokens JSON has no refreshToken. Re-run `sesame login` / `sesame verify`.');
+		throw new Error(
+			'Tokens JSON has no refreshToken. Re-run `npx n8n-nodes-open-sesame login` / `verify`.',
+		);
 	}
 	if (tokens.deviceKey && !(tokens.deviceGroupKey && tokens.devicePassword)) {
 		throw new Error(
@@ -103,17 +107,74 @@ export interface StateInfo {
 	[key: string]: unknown;
 }
 
+/** Lock states reported by SESAME locks (`sesame_5`, `sesame_6`, ...). */
+export const LOCK_EVENTS: readonly LockEvent[] = ['locked', 'unlocked'];
+
+/** Door states reported by an Open Sensor. Sent capitalised (`Open` / `Closed`) — see below. */
+export const SENSOR_EVENTS: readonly SensorEvent[] = ['open', 'closed'];
+
+const CATEGORY_BY_EVENT: ReadonlyMap<string, EventCategory> = new Map([
+	...LOCK_EVENTS.map((e) => [e, 'lock' as EventCategory] as const),
+	...SENSOR_EVENTS.map((e) => [e, 'sensor' as EventCategory] as const),
+]);
+
 /**
- * Maps a push payload to a lock event.
+ * Statuses that are genuine device states but not worth a workflow run.
  *
- * Returns null for the frequent `{wm2State: true}` keepalive-ish pushes that carry no lock
- * status, and for intermediate states (`moved`, Open Sensor's `Open`/`Closed`, ...).
+ * `moved` is the OS2 in-between state while the thumbturn travels; OS3 locks do not report it
+ * (see MECH_STATE in @sesame-kit/core, which is a two-value enum there).
  */
-export function getLockEvent(stateInfo: StateInfo | undefined): LockEvent | null {
-	const status = stateInfo?.CHSesame2Status;
-	if (status === 'locked') return 'locked';
-	if (status === 'unlocked') return 'unlocked';
-	return null;
+const IGNORED_STATUSES: ReadonlySet<string> = new Set(['moved']);
+
+export interface DerivedEvent {
+	/** Lower-cased `CHSesame2Status`. */
+	event: string;
+	category: EventCategory;
+}
+
+/**
+ * Maps a push payload to an event.
+ *
+ * Returns null for the frequent `{wm2State: true}` keepalive-ish pushes that carry no status at
+ * all, and for intermediate states listed in IGNORED_STATUSES.
+ *
+ * `CHSesame2Status` is a free-form string in the cloud API (and in @sesame-kit/core's StateInfo),
+ * so anything outside the known vocabulary is returned with category `unknown` rather than being
+ * guessed at or silently dropped — the caller decides whether to forward it.
+ *
+ * The case folding is load-bearing, not defensive: an `open_sensor_1` reports `Closed`
+ * (capitalised) while locks report `locked` / `unlocked` in lower case. Verified against a live
+ * device via `getDeviceStatus`.
+ */
+export function deriveEvent(stateInfo: StateInfo | undefined): DerivedEvent | null {
+	const raw = stateInfo?.CHSesame2Status;
+	if (typeof raw !== 'string') return null;
+
+	const event = raw.trim().toLowerCase();
+	if (!event || IGNORED_STATUSES.has(event)) return null;
+
+	return { event, category: CATEGORY_BY_EVENT.get(event) ?? 'unknown' };
+}
+
+/**
+ * Normalises the `eventFilter` node parameter into a set of wanted events.
+ *
+ * Returns null for "no filtering", which is what the legacy `all` meant. v0.2.x stored a single
+ * string (`all` / `locked` / `unlocked`); v0.3.0 stores a list. Both shapes are accepted so
+ * existing workflows keep their behaviour without being re-saved.
+ *
+ * An empty list is taken at face value — the user deselected everything, so nothing matches. The
+ * caller is expected to warn about that, since a trigger that silently never fires is the exact
+ * failure mode this node already had once.
+ */
+export function parseEventFilter(raw: unknown): ReadonlySet<string> | null {
+	if (Array.isArray(raw)) {
+		return new Set(raw.map((v) => String(v).toLowerCase()));
+	}
+	if (typeof raw === 'string' && raw !== '') {
+		return raw === 'all' ? null : new Set([raw.toLowerCase()]);
+	}
+	return new Set<string>(LOCK_EVENTS);
 }
 
 /** Battery warning threshold, matching the official app's low-battery badge. */

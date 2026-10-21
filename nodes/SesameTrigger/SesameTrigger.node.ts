@@ -6,12 +6,13 @@ import type {
 } from 'n8n-workflow';
 import {
 	createMemoryTokenStore,
-	getLockEvent,
+	deriveEvent,
 	isBatteryCritical,
 	normalizeUuid,
+	parseEventFilter,
 	parseTokensJson,
 } from './SesameHelper';
-import type { LockEvent, StateInfo } from './SesameHelper';
+import type { StateInfo } from './SesameHelper';
 
 interface StateChangePush {
 	data?: {
@@ -27,8 +28,9 @@ export class SesameTrigger implements INodeType {
 		icon: 'file:sesame.svg',
 		group: ['trigger'],
 		version: 1,
-		subtitle: 'Sesame Lock Event',
-		description: 'Triggers the workflow when a SESAME smart lock is locked or unlocked',
+		subtitle: 'Sesame Device Event',
+		description:
+			'Triggers the workflow when a SESAME smart lock is locked or unlocked, or an Open Sensor reports the door opening or closing',
 		defaults: {
 			name: 'Sesame Trigger',
 		},
@@ -42,16 +44,30 @@ export class SesameTrigger implements INodeType {
 		],
 		properties: [
 			{
-				displayName: 'Event Filter',
+				displayName: 'Events',
 				name: 'eventFilter',
-				type: 'options',
+				type: 'multiOptions',
 				options: [
-					{ name: 'All Events', value: 'all' },
-					{ name: 'Locked Only', value: 'locked' },
-					{ name: 'Unlocked Only', value: 'unlocked' },
+					{ name: 'Locked', value: 'locked', description: 'A lock was locked' },
+					{ name: 'Unlocked', value: 'unlocked', description: 'A lock was unlocked' },
+					{ name: 'Opened', value: 'open', description: 'An Open Sensor reported the door open' },
+					{
+						name: 'Closed',
+						value: 'closed',
+						description: 'An Open Sensor reported the door closed',
+					},
 				],
-				default: 'all',
-				description: 'Which lock events should trigger the workflow',
+				default: ['locked', 'unlocked'],
+				description:
+					'Which device events should trigger the workflow. Open Sensor events only arrive for sensor UUIDs listed in the credential.',
+			},
+			{
+				displayName: 'Emit Unknown Statuses',
+				name: 'emitUnknownStatuses',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to also emit statuses outside the known vocabulary. The cloud reports CHSesame2Status as a free-form string, so a device model this node has not seen may use a value not in the Events list; such statuses are logged as a warning either way.',
 			},
 			{
 				displayName: 'Emit Only On Change',
@@ -81,11 +97,19 @@ export class SesameTrigger implements INodeType {
 		const tokens = parseTokensJson((credentials.tokensJson as string) ?? '');
 		const companyID = ((credentials.companyID as string) || 'ch_CandyhouseMobile').trim();
 
-		const eventFilter = this.getNodeParameter('eventFilter') as 'all' | LockEvent;
+		const eventFilter = parseEventFilter(this.getNodeParameter('eventFilter', ['locked', 'unlocked']));
 		const emitOnlyOnChange = this.getNodeParameter('emitOnlyOnChange') as boolean;
+		const emitUnknownStatuses = this.getNodeParameter('emitUnknownStatuses', false) as boolean;
+
+		if (eventFilter?.size === 0 && !emitUnknownStatuses) {
+			this.logger.warn(
+				'No events are selected, so this trigger will never fire. Pick at least one event.',
+			);
+		}
 
 		const watched = new Set(deviceUuids.map(normalizeUuid));
-		const lastEventByDevice = new Map<string, LockEvent>();
+		const lastEventByDevice = new Map<string, string>();
+		const warnedStatuses = new Set<string>();
 
 		// Released by closeFunction; keeps the scoped `SesameHub3.use` session open.
 		let release: () => void = () => {};
@@ -103,19 +127,33 @@ export class SesameTrigger implements INodeType {
 
 			this.logger.debug(`Sesame push for ${deviceUuid}: ${JSON.stringify(stateInfo)}`);
 
-			// Most pushes are `{wm2State: true}` heartbeats with no lock status.
-			const event = getLockEvent(stateInfo);
-			if (event === null) return;
+			// Most pushes are `{wm2State: true}` heartbeats with no status at all.
+			const derived = deriveEvent(stateInfo);
+			if (derived === null) return;
+			const { event, category } = derived;
+
+			if (category === 'unknown') {
+				if (!warnedStatuses.has(event)) {
+					warnedStatuses.add(event);
+					this.logger.warn(
+						`Unrecognised CHSesame2Status "${event}" from ${deviceUuid}` +
+							(emitUnknownStatuses ? '' : '; enable "Emit Unknown Statuses" to forward it'),
+					);
+				}
+				// An unknown status cannot be named in the Events list, so that list cannot gate it.
+				if (!emitUnknownStatuses) return;
+			}
 
 			if (emitOnlyOnChange && lastEventByDevice.get(key) === event) return;
 			lastEventByDevice.set(key, event);
 
-			if (eventFilter !== 'all' && eventFilter !== event) return;
+			if (category !== 'unknown' && eventFilter && !eventFilter.has(event)) return;
 
 			this.emit([
 				this.helpers.returnJsonArray([
 					{
 						event,
+						eventCategory: category,
 						deviceUuid,
 						batteryPercentage: stateInfo.batteryPercentage,
 						batteryVoltage: stateInfo.batteryVoltage,

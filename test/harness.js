@@ -3,10 +3,15 @@ const {SesameTrigger}=require('../dist/nodes/SesameTrigger/SesameTrigger.node.js
 const tokensJson=fs.readFileSync(path.join(os.homedir(),'.config','sesame-kit','tokens.json'),'utf8');
 const UUID=process.env.SESAME_UUID;
 if(!UUID){console.error('set SESAME_UUID=<device uuid>');process.exit(1);}
-const params={eventFilter:'all',emitOnlyOnChange:true};
+// SESAME_EVENTS=locked,open to narrow it down; default watches everything, unknown included.
+const params={
+  eventFilter:process.env.SESAME_EVENTS?process.env.SESAME_EVENTS.split(','):'all',
+  emitOnlyOnChange:process.env.EMIT_ON_CHANGE!=='0',
+  emitUnknownStatuses:true,
+};
 const ctx={
   getCredentials:async()=>({deviceUuids:UUID,tokensJson,companyID:'ch_CandyhouseMobile'}),
-  getNodeParameter:(n)=>params[n],
+  getNodeParameter:(n,d)=>(n in params?params[n]:d),
   getMode:()=>'trigger',
   emit:(data)=>console.log(new Date().toISOString(),'>>> EMIT',JSON.stringify(data[0],null,1)),
   emitError:(e)=>console.log('>>> EMIT ERROR',e.message),
