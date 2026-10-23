@@ -10,7 +10,8 @@ and unlock events arrive immediately — no polling, no Web API rate-limit conce
 > multi-select (`Locked` / `Unlocked` / `Opened` / `Closed`, default `Locked` + `Unlocked`) and
 > output gained `eventCategory`. Existing workflows keep working: the old single-value filter is
 > still understood, and sensor events only arrive for sensor UUIDs you add to the credential.
-> Minting tokens no longer needs the separate `sesame-kit` CLI — this package ships the login flow.
+> Minting tokens no longer needs the separate `sesame-kit` CLI — this package ships the login
+> flow, and `npx n8n-nodes-open-sesame setup` walks the whole credential setup interactively.
 
 > **Breaking change in v0.2.0** — v0.1.x subscribed to the AWS IoT device shadow with
 > *unauthenticated* Cognito credentials (the route popularised by `homebridge-open-sesame` and
@@ -34,27 +35,100 @@ Alternatively, install via CLI:
 npm install n8n-nodes-open-sesame
 ```
 
+## Upgrading from v0.1.x
+
+v0.2.0 changed what the credential stores, so an existing credential does **not** keep working on
+its own. n8n gives no upgrade prompt — the workflow just stops activating. Three things to do:
+
+### 1. Install, then restart n8n
+
+Community nodes are loaded at start-up, so the new version is not picked up until n8n restarts.
+
+### 2. Add the new credential fields
+
+A credential created for v0.1.x holds only **Device UUID(s)**. Until **Tokens JSON** is filled in
+(see [Setup](#setup)), every activation attempt fails with:
+
+```
+There was a problem activating the workflow: "Tokens JSON is not valid JSON.
+Paste the JSON printed by `npx n8n-nodes-open-sesame verify <code>`."
+```
+
+n8n retries activation with an exponential backoff that quickly grows to several minutes, so
+saving the credential does not bring the workflow back right away. Toggle the workflow
+**Inactive → Active** to reactivate it immediately instead of waiting out the backoff.
+
+### 3. Re-check Events on existing trigger nodes
+
+A trigger node saved before v0.3.0 has no stored **Events** value, so it falls back to the default
+`Locked` + `Unlocked`. A workflow built to watch an Open Sensor stays silent until you open the
+node and tick `Opened` / `Closed`.
+
+### Confirming it worked
+
+```
+Subscribed to SESAME state push for 1 device(s)
+```
+
+That line in the n8n log means the credential was accepted and the subscription is live. Until it
+appears, the trigger is not listening.
+
 ## Setup
 
-### 1. Sign in to your SESAME account once
+### 1. Run the guided setup
 
 The push channel requires a logged-in account. The official login is passwordless: a code is
 emailed to you. This package ships a small CLI that runs the same flow, so no extra tool is
-needed — it is a thin wrapper over `@sesame-kit/core`, which the node itself runs on:
+needed — it is a thin wrapper over `@sesame-kit/core`, which the node itself runs on.
+
+```bash
+npx n8n-nodes-open-sesame setup
+```
+
+It asks for your email, waits for the code you receive, lists the devices on the account so you
+can pick the ones to watch, and ends by printing the three values the credential wants:
+
+```
+SESAME account setup for the n8n credential.
+
+SESAME account email: you@example.com
+
+A verification code was emailed to you@example.com.
+Verification code: 123456
+Signed in.
+
+Devices on this account:
+  1) XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX  sesame_5 — Front door
+  2) YYYYYYYY-YYYY-YYYY-YYYY-YYYYYYYYYYYY  open_sensor_1 — Entrance sensor
+
+Watch which devices? (numbers, or Enter for all) 1,2
+
+--- Paste these into n8n: Credentials > New > Sesame API ---
+```
+
+Pass the address up front with `setup you@example.com` to skip the first question. If tokens are
+already stored it offers to reuse them and jumps straight to device selection, so re-running it
+is a cheap way to change which devices you watch. A mistyped code is re-prompted (three attempts
+before the challenge is abandoned). Ctrl-C and Ctrl-D both cancel; tokens already minted stay
+saved, so re-running resumes at the device picker.
+
+### Running the steps individually
+
+`setup` needs an interactive terminal. In a script — or if you prefer the steps apart — use:
 
 ```bash
 npx n8n-nodes-open-sesame login you@example.com   # a verification code is emailed to you
 npx n8n-nodes-open-sesame verify <code>           # prints the Tokens JSON to paste into n8n
+npx n8n-nodes-open-sesame devices                 # UUID, model and nickname per device
 ```
 
-Tokens are also written to `~/.config/sesame-kit/tokens.json` (override with `--config-dir`), so
-`npx n8n-nodes-open-sesame tokens` re-prints them later. `logout` revokes the refresh token.
+Either way, tokens are written to `~/.config/sesame-kit/tokens.json` (override with
+`--config-dir`), so `npx n8n-nodes-open-sesame tokens` re-prints them later. `logout` revokes the
+refresh token. `--company <id>` overrides the Company ID that `setup` and `devices` query with;
+leave it alone for a personal account.
 
-### 2. Find your device UUID
-
-```bash
-npx n8n-nodes-open-sesame devices    # UUID, model and nickname per device
-```
+Interactive prompts go to stderr and the resulting values to stdout, so `setup > credential.txt`
+captures just the values while the conversation stays on screen.
 
 The SESAME app shows the same UUIDs under device settings.
 
@@ -64,11 +138,11 @@ capitalised. All of them are supported and matched case-insensitively — list w
 want to watch. Other models (Touch, Face, ...) may publish values this node has not seen; see
 [Unknown statuses](#unknown-statuses).
 
-### 3. Configure credentials in n8n
+### 2. Configure credentials in n8n
 
 1. Go to **Credentials** > **New** > **Sesame API**
 2. **Device UUID(s)** — the lock(s) and/or Open Sensor(s) to watch, comma-separated
-3. **Tokens JSON** — paste the JSON printed by `verify` (or re-print it with
+3. **Tokens JSON** — paste the JSON printed by `setup` or `verify` (or re-print it with
    `npx n8n-nodes-open-sesame tokens`)
 4. **Company ID** — leave at `ch_CandyhouseMobile` for a personal account
 
@@ -79,7 +153,7 @@ The node refreshes the Cognito id token on its own. Refresh tokens are not rotat
 value keeps working across n8n restarts; you only repeat step 1 if you sign out elsewhere or the
 refresh token is revoked.
 
-### 4. Create a workflow
+### 3. Create a workflow
 
 1. Add a **Sesame Trigger** node
 2. Select your Sesame API credential

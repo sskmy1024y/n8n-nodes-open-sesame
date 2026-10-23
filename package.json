@@ -10,7 +10,6 @@
 		"smart-lock",
 		"websocket"
 	],
-	"main": "dist/index.js",
 	"bin": {
 		"n8n-nodes-open-sesame": "bin/n8n-nodes-open-sesame.mjs"
 	},

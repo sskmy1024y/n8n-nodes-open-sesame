@@ -1,0 +1,3 @@
+# files[] in package.json is the whitelist; this is a guard against build artefacts
+# reappearing inside dist/ (tsbuildinfo used to be emitted there and shipped).
+*.tsbuildinfo
