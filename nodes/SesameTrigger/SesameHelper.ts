@@ -185,3 +185,44 @@ export function isBatteryCritical(batteryPercentage: number | undefined): boolea
 		? batteryPercentage <= BATTERY_CRITICAL_PERCENTAGE
 		: false;
 }
+
+export interface RetryLadderOptions {
+	/** The work to attempt. Resolves on success, throws to trigger a retry. */
+	attempt: () => Promise<void>;
+	/** Total attempts, including the first. Must be >= 1. */
+	attempts: number;
+	/** Delay before the retry that follows a failed attempt N (1-based). */
+	delayMs: (attemptNumber: number) => number;
+	sleep: (ms: number) => Promise<void>;
+	onRetry: (attemptNumber: number, error: Error) => void;
+	/** Called once, after the final attempt fails. */
+	onGiveUp: (error: Error) => void;
+}
+
+/**
+ * Runs `attempt` until it succeeds or the budget is spent, then escalates.
+ *
+ * Extracted from the trigger so the recovery path can actually be tested: it is the branch
+ * that only runs when something is already broken, which is exactly the code most likely to
+ * be wrong and least likely to be exercised in production.
+ *
+ * Returns true if an attempt succeeded. No delay is slept after the final failure — the
+ * caller escalates immediately rather than pausing on the way out.
+ */
+export async function runRetryLadder(opts: RetryLadderOptions): Promise<boolean> {
+	const { attempt, attempts, delayMs, sleep, onRetry, onGiveUp } = opts;
+	for (let n = 1; n <= attempts; n += 1) {
+		try {
+			await attempt();
+			return true;
+		} catch (error) {
+			if (n < attempts) {
+				onRetry(n, error as Error);
+				await sleep(delayMs(n));
+			} else {
+				onGiveUp(error as Error);
+			}
+		}
+	}
+	return false;
+}

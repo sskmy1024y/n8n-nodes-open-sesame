@@ -11,8 +11,16 @@ import {
 	normalizeUuid,
 	parseEventFilter,
 	parseTokensJson,
+	runRetryLadder,
 } from './SesameHelper';
 import type { StateInfo } from './SesameHelper';
+
+/** How many times a failed re-arm is retried in place before the trigger is restarted. */
+const REARM_ATTEMPTS = 3;
+/** Base delay between re-arm attempts; multiplied by the attempt number. */
+const REARM_RETRY_DELAY_MS = 2_000;
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 interface StateChangePush {
 	data?: {
@@ -177,24 +185,87 @@ export class SesameTrigger implements INodeType {
 
 		const tokenStore = createMemoryTokenStore(tokens);
 
+		// `@sesame-kit/core` logs connect/close/reconnect/token-refresh to stderr when `debug` is
+		// set. Those are the events that explain a subscription going quiet, and nothing else
+		// surfaces them — n8n's own log level cannot reach inside the library. Off by default
+		// because the transport also logs (redacted) frame payloads.
+		const transportDebug = /^(1|true)$/i.test(process.env.N8N_SESAME_DEBUG ?? '');
+
 		const session = SesameHub3.use(
-			{ tokenStore, config: { companyID } },
+			{ tokenStore, config: { companyID }, debug: transportDebug },
 			async (hub: SesameHubLike) => {
-				// The server only pushes for devices named in a `subscribeDevicesUpdate` frame, and
-				// it expects the frame to carry `deviceModel` as the official web app sends it — a
-				// UUID-only item is accepted but produces no pushes. Look the models up once.
 				const models = new Map<string, string | undefined>();
-				try {
+				const loadDevices = async () => {
+					models.clear();
 					for (const device of await hub.listDevices()) {
 						if (device?.deviceUUID) {
 							models.set(normalizeUuid(device.deviceUUID), device.deviceModel);
 						}
 					}
+				};
+
+				try {
+					await loadDevices();
 				} catch (error) {
 					this.logger.warn(
 						`Could not list SESAME devices, subscribing without deviceModel: ${(error as Error).message}`,
 					);
 				}
+
+				// What actually arms state pushes for a connection is the `getCompanyDevice` frame
+				// that listDevices() sends — NOT `subscribeDevicesUpdate`, which this cloud answers
+				// with `400 Invalid operation`. A reconnect therefore silently un-subscribes us:
+				// the transport re-sends only the (rejected) subscribe frame, the socket looks
+				// healthy, and no push ever arrives again. Observed in production on 2026-10-23:
+				// pushes stopped dead at the first reconnect and never resumed.
+				//
+				// The official web app avoids this by re-fetching the device list on every new
+				// connection (useManageDevice.js:352-358, onConnectionIdChange -> getCompanyDevices
+				// -> subscribeDevices). Do the same. Registered before the per-device subscriptions
+				// so this callback runs first, matching that order.
+				// Recovery ladder for a failed re-arm. A reconnect often coincides with the network
+				// still settling, so a first failure is usually transient and worth retrying in
+				// place. Only once that is exhausted is the trigger genuinely unable to receive
+				// events, and the honest response is to fail loudly: emitError makes n8n tear the
+				// trigger down and re-activate it, which builds a whole new session — connection,
+				// token and `getCompanyDevice` included. Staying quiet instead would recreate the
+				// exact silent-death this node exists to avoid.
+				let rearmInFlight = false;
+				const rearm = async () => {
+					// Reconnects can arrive back-to-back; one ladder at a time is enough.
+					if (rearmInFlight) return;
+					rearmInFlight = true;
+					try {
+						await runRetryLadder({
+							attempts: REARM_ATTEMPTS,
+							attempt: loadDevices,
+							delayMs: (n) => REARM_RETRY_DELAY_MS * n,
+							sleep: delay,
+							onRetry: (n, error) =>
+								this.logger.warn(
+									`Re-arming the SESAME subscription failed (attempt ${n}/${REARM_ATTEMPTS}): ` +
+										`${error.message}; retrying`,
+								),
+							onGiveUp: (error) => {
+								this.logger.error(
+									`Could not re-arm the SESAME subscription after ${REARM_ATTEMPTS} attempts; ` +
+										'no events can arrive on this connection, so the trigger is being restarted',
+									{ error: error.message },
+								);
+								this.emitError?.(error);
+							},
+						}).then((ok) => {
+							if (ok) this.logger.info('SESAME subscription re-armed after reconnect');
+						});
+					} finally {
+						rearmInFlight = false;
+					}
+				};
+
+				hub.onReconnect(() => {
+					this.logger.info('SESAME push connection re-established; re-arming subscription');
+					void rearm();
+				});
 
 				const unsubscribes = deviceUuids.map((uuid) => {
 					const deviceModel = models.get(normalizeUuid(uuid));
@@ -261,6 +332,8 @@ interface SesameDeviceLike {
 
 interface SesameHubLike {
 	listDevices: () => Promise<SesameDeviceLike[]>;
+	/** Registers a callback fired after the transport re-opens the WebSocket. */
+	onReconnect: (fn: () => void) => () => void;
 	onLockStateChangeDevice: (
 		deviceUUID: string,
 		fn: (msg: StateChangePush) => void,

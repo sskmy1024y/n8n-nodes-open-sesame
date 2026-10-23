@@ -39,6 +39,7 @@
 		"@sesame-kit/core": "^0.7.0"
 	},
 	"devDependencies": {
+		"@types/node": "22.20.5",
 		"n8n-workflow": "*",
 		"tsx": "^4.21.0",
 		"typescript": "~5.7.0"
